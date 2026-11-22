@@ -1,0 +1,24 @@
+[project]
+name = "skillget"
+version = "0.1.0"
+description = "Harvest TypingMind open-source agent skills into ~/.agents/skills"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "skillget contributors" }]
+dependencies = ["requests>=2.32"]
+
+[project.urls]
+Homepage = "https://github.com/yourbossdonpely/skillget"
+Issues = "https://github.com/yourbossdonpely/skillget/issues"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
