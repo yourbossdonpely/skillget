@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 TOOLS = Path(__file__).resolve().parent
 ROOT = TOOLS.parent
@@ -37,6 +38,14 @@ def log(msg: str) -> None:
                 f.write(line + "\n")
 
 
+def normalize_category(value: str) -> str:
+    """Accept a bare category or a full TypingMind skills URL."""
+    if "://" not in value and "typingmind.com" not in value:
+        return value
+    query = parse_qs(urlparse(value).query)
+    return (query.get("category") or [value])[0]
+
+
 def load_catalog(args) -> dict:
     if CATALOG_PATH.exists() and not args.refresh_catalog:
         data = tm_catalog.load_json(CATALOG_PATH, {})
@@ -45,21 +54,52 @@ def load_catalog(args) -> dict:
     log(f"Fetching catalog for category={args.category} sort={args.sort} ...")
     build = tm_catalog.discover_build_id()
     log(f"buildId={build}")
-    skills, total = tm_catalog.fetch_catalog(
-        args.category,
-        sort=args.sort,
-        workers=args.catalog_workers,
-        build=build,
-        max_pages=args.max_pages,
-        progress=lambda p, pages, n: log(f"catalog page {p}/{pages} ({n} rows)"),
-    )
-    if len(skills) < total - 2 and not args.max_pages:
-        log(f"catalog has {len(skills)} unique of {total}; unioning with trending order")
-        extra, _ = tm_catalog.fetch_catalog(
-            args.category, sort="trending", workers=args.catalog_workers, build=build
+    cap = tm_catalog.PAGE_SIZE * 200
+    use_author = args.split_by == "author"
+    if args.split_by != "none" and not args.max_pages:
+        try:
+            preview = tm_catalog.fetch_page_props(args.category, sort=args.sort, build=build)
+            total_preview = int(preview.get("totalCount") or 0)
+            if total_preview > cap:
+                log(f"total {total_preview} exceeds the {cap}-row page cap; "
+                    f"partitioning by author")
+                use_author = True
+        except Exception as e:
+            log(f"catalog preview failed ({type(e).__name__}: {e})")
+
+    if use_author:
+        skills, total = tm_catalog.fetch_catalog_by_author(
+            args.category,
+            sort=args.sort,
+            workers=args.catalog_workers,
+            build=build,
+            progress=lambda d, n, u: log(f"author {d}/{n} ({u} unique)"),
         )
-        seen = {s.slug for s in skills}
-        skills.extend(s for s in extra if s.slug not in seen)
+        log(f"author partition produced {len(skills)} unique of {total}")
+    else:
+        skills, total = tm_catalog.fetch_catalog(
+            args.category,
+            sort=args.sort,
+            workers=args.catalog_workers,
+            build=build,
+            max_pages=args.max_pages,
+            progress=lambda p, pages, n: log(f"catalog page {p}/{pages} ({n} rows)"),
+        )
+        if len(skills) < total - 2 and not args.max_pages and args.split_by != "none":
+            log(f"catalog has {len(skills)} unique of {total}; partitioning by author")
+            try:
+                extra, _ = tm_catalog.fetch_catalog_by_author(
+                    args.category,
+                    sort=args.sort,
+                    workers=args.catalog_workers,
+                    build=build,
+                    progress=lambda d, n, u: log(f"author {d}/{n} ({u} unique)"),
+                )
+                seen = {s.slug for s in skills}
+                skills.extend(s for s in extra if s.slug not in seen)
+                log(f"after author partition: {len(skills)} unique")
+            except Exception as e:
+                log(f"author partition failed ({type(e).__name__}: {e}); keeping page-based set")
     data = {
         "category": args.category,
         "sort": args.sort,
@@ -296,6 +336,8 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--refresh-catalog", action="store_true")
         sp.add_argument("--max-pages", type=int, default=None)
         sp.add_argument("--catalog-workers", type=int, default=8)
+        sp.add_argument("--split-by", choices=["auto", "author", "none"], default="auto",
+                        help="how to break past the 200-page list cap (author = full coverage)")
 
     c = sub.add_parser("catalog", help="fetch and cache the category catalog")
     common(c)
@@ -345,6 +387,8 @@ def main(argv=None) -> int:
     except Exception:
         pass
     args = build_parser().parse_args(argv)
+    if getattr(args, "category", None):
+        args.category = normalize_category(args.category)
     return args.func(args)
 
 

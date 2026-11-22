@@ -12,6 +12,27 @@ from tm_catalog import request
 
 RAW = "https://raw.githubusercontent.com"
 
+WINDOWS_ILLEGAL = re.compile(r'[<>:"|?*\x00-\x1f]')
+WINDOWS_RESERVED = {
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+}
+
+
+def safe_part(name: str) -> str:
+    """Make one path segment writable on Windows (and anywhere else)."""
+    out = WINDOWS_ILLEGAL.sub("_", name.replace("\\", "_"))
+    out = out.rstrip(" .") or "_"
+    stem = out.split(".")[0].lower()
+    if stem in WINDOWS_RESERVED:
+        out = f"_{out}"
+    # Windows caps a single segment at 255 chars; keep extensions readable.
+    if len(out) > 120:
+        base, dot, ext = out.rpartition(".")
+        out = (base[: 120 - len(ext) - 1] + dot + ext) if dot and len(ext) <= 10 else out[:120]
+    return out
+
 
 def clean_relpath(p: str) -> Path | None:
     """Convert a repository-relative path to a safe local Path (no traversal)."""
@@ -26,7 +47,9 @@ def clean_relpath(p: str) -> Path | None:
     parts = [x for x in raw_parts if x not in ("", ".")]
     if not parts:
         return None
-    return Path(*parts)
+    # Keep folder names valid on Windows too: upstream repos may ship files such
+    # as `Sources/iPhone/<Name>App.swift`, which NTFS refuses to create.
+    return Path(*(safe_part(x) for x in parts))
 
 
 def parse_source(skill: dict[str, Any]) -> tuple[str, str, str, str] | None:

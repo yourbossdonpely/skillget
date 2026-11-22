@@ -152,6 +152,80 @@ def fetch_catalog(
     return out, total
 
 
+def fetch_page_props(
+    category: str,
+    *,
+    page: int = 1,
+    sort: str = "stars",
+    build: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Return the full ``pageProps.json`` for one list page (includes filters)."""
+    url = f"{BASE}/_next/data/{build}/skills.json"
+    params = {"category": category, "page": page, "sort": sort, **extra}
+    r = request(url, params=params)
+    if r is None or r.status_code != 200:
+        raise RuntimeError(f"page props failed: {r.status_code if r is not None else 'no response'}")
+    data = r.json()
+    return (data.get("props") or data)["pageProps"]["json"]
+
+
+def fetch_catalog_by_author(
+    category: str,
+    *,
+    sort: str = "stars",
+    workers: int = 10,
+    build: str | None = None,
+    progress=None,
+) -> tuple[list[CatalogSkill], int]:
+    """Enumerate a category the site will not page past 200 for.
+
+    The list endpoint clamps every ordering at page 200 (~10.2k rows), so a large
+    category is unreachable by ``page`` alone. The ``author`` filter is
+    category-scoped and each author has few skills, so iterating authors covers
+    the full category.
+    """
+    build = build or discover_build_id()
+    first = fetch_page_props(category, sort=sort, build=build)
+    total = int(first.get("totalCount") or 0)
+    authors = [a["id"] for a in (first.get("authorOptions") or []) if a.get("id")]
+
+    def author_rows(author: str) -> list[dict]:
+        rows: list[dict] = []
+        page = 1
+        while True:
+            pp = fetch_page_props(category, page=page, sort=sort, build=build, author=author)
+            items = pp.get("skills") or []
+            rows.extend(items)
+            count = int(pp.get("totalCount") or 0)
+            pages = (count + PAGE_SIZE - 1) // PAGE_SIZE
+            if page >= pages or not items:
+                break
+            page += 1
+        return rows
+
+    seen: set[str] = set()
+    out: list[CatalogSkill] = []
+    done = 0
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(author_rows, a): a for a in authors}
+        for fut in cf.as_completed(futures):
+            done += 1
+            try:
+                rows = fut.result()
+            except Exception:
+                rows = []
+            for row in rows:
+                slug = row.get("slug")
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                out.append(CatalogSkill.from_json(row))
+            if progress and done % 200 == 0:
+                progress(done, len(authors), len(out))
+    return out, total
+
+
 def fetch_detail(slug: str, build: str) -> dict[str, Any]:
     url = f"{BASE}/_next/data/{build}/skills/{slug}.json"
     last_err = "unknown"

@@ -112,8 +112,14 @@ those skills' frontmatter. Keep the subset small (tens, not thousands).
 
 1. **Catalog.** The TypingMind skills page is a Next.js app. Its page-data endpoint
    (`/_next/data/<buildId>/skills.json?category=devops&page=N&sort=stars`) returns 51
-   skills per page as JSON. `skillget` walks all 182 pages and deduplicates by slug.
+   skills per page as JSON. `skillget` walks every page and deduplicates by slug.
    `sort=stars` is used because it is stable across page requests.
+2. **Large categories (200-page cap).** The list endpoint clamps every ordering at
+   page 200 (~10,200 rows), so a category bigger than that cannot be enumerated by
+   paging alone (e.g. `software-development` reports 34,491). `skillget` detects this
+   and partitions the category by the category-scoped `author` filter: each author has
+   few skills, so iterating the site's `authorOptions` covers the full category. This
+   is controlled by `--split-by auto|author|none` (default `auto`).
 2. **Detail.** Each skill has a JSON detail endpoint
    (`/_next/data/<buildId>/skills/<slug>.json`) containing the full `bodyMarkdown`,
    license, compatibility, `allowedTools`, `sourceURL`, `owner`, `repo`, `path`,
@@ -139,6 +145,7 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 | Command | What it does |
 | --- | --- |
 | `python tools/skillget.py catalog` | Fetch and cache the category catalog. |
+| `python tools/skillget.py catalog --split-by author` | Force author partitioning (required past the 200-page cap). |
 | `python tools/skillget.py crawl` | Install every catalog skill not already `ok`. |
 | `python tools/skillget.py crawl --limit 50` | Install the next 50 only. |
 | `python tools/skillget.py crawl --only slug-a,slug-b` | Install specific slugs. |
@@ -159,7 +166,14 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 
 Useful flags: `--category`, `--sort`, `--dest`, `--manifest`, `--workers`,
 `--resource-workers`, `--refresh-catalog`, `--max-pages`, `--build`, `--force`,
-`--cache-details`.
+`--cache-details`, `--split-by`.
+
+`--category` also accepts a full TypingMind URL, so a pasted link just works:
+
+```powershell
+python tools/skillget.py catalog --category "https://www.typingmind.com/skills?category=software-development" --refresh-catalog
+python tools/skillget.py crawl --category "https://www.typingmind.com/skills?category=software-development" --quiet
+```
 
 ## Output layout
 

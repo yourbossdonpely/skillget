@@ -5,7 +5,7 @@ All scripts are plain Python 3.10+ and use only `requests`.
 | File | Purpose |
 | --- | --- |
 | `skillget.py` | Main CLI: `catalog`, `crawl`, `status`, `verify`, `list`. |
-| `tm_catalog.py` | TypingMind Next.js page-data client (catalog + detail). |
+| `tm_catalog.py` | TypingMind Next.js page-data client (catalog + detail + author partitioning). |
 | `github_fetch.py` | Raw GitHub downloads, path safety, resource fan-out. |
 | `installer.py` | Atomic skill folder writer, frontmatter synthesis, manifest. |
 | `quiet.py` | Add `metadata.opencode/autoinvoke: false` without rewriting the rest of the YAML. |
@@ -19,6 +19,13 @@ All scripts are plain Python 3.10+ and use only `requests`.
 | `probe_api.py` | Debug: check pagination and Next.js data endpoints. |
 | `probe2.py` | Debug: check detail fields and raw GitHub access. |
 | `bench.py` | Debug: measure detail-endpoint concurrency. |
+
+## Large categories and the 200-page cap
+
+The list endpoint clamps every sort at page 200 (~10,200 rows). `fetch_catalog_by_author`
+enumerates a larger category by iterating the site's `authorOptions` with the
+category-scoped `author` filter. `catalog --split-by auto` uses it automatically when
+`totalCount > 10,200`; `--split-by none` disables it.
 
 ## Repair after an interrupted crawl
 
