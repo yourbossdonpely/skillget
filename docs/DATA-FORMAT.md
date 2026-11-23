@@ -4,6 +4,24 @@ All JSON is UTF-8, pretty-printed, and written atomically (`.tmp` + replace).
 
 ## `data/catalog.json`
 
+A category catalog lives at `data/catalog.json`. A **search** catalog lives at
+`data/catalog-<category>-<slugified-query>.json` and adds a top-level `q` field, so a
+search can never overwrite the category catalog:
+
+```json
+{
+  "category": "media",
+  "q": "blender",
+  "sort": "stars",
+  "build": "build-TfctsWXpff2fKS",
+  "total": 17,
+  "fetched_at": "2026-11-23T02:28:00+00:00",
+  "skills": [ { "slug": "varghq-blender-code-film", "...": "..." } ]
+}
+```
+
+A category catalog (no `q`) looks like:
+
 ```json
 {
   "category": "devops",
@@ -25,6 +43,9 @@ All JSON is UTF-8, pretty-printed, and written atomically (`.tmp` + replace).
   ]
 }
 ```
+
+The `q` key is absent for category catalogs, so consumers can tell the two apart. Both
+share the `skills[]` row shape.
 
 ## `data/manifest*.json`
 

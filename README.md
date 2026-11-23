@@ -5,12 +5,19 @@ Harvest open-source AI agent skills from the
 local, ready-to-use skill folders (`SKILL.md` + supporting files) under
 `~/.agents/skills/`.
 
-The default target is the **DevOps** category: **9,271 skills**. The crawler is
-resumable, keeps a per-skill manifest, never overwrites a skill it did not install,
-and can stage the bulk outside the live skill root so a long crawl does not flood an
-agent's context window.
+The default target is the **DevOps** category (**9,271 skills**), but any category or
+any site search works. The crawler is resumable, keeps a per-skill manifest, never
+overwrites a skill it did not install, and can stage the bulk outside the live skill
+root so a long crawl does not flood an agent's context window.
 
-> **Status:** first full DevOps mirror in progress. See [Run status](#run-status).
+Two modes:
+
+- **Category harvest** — mirror an entire category (`--category`).
+- **Search harvest** — crawl only the hits for a query (`--q`, or a pasted search URL).
+
+> **Status:** the local library holds **45,775 manifest entries** (45,774 `ok`), including
+the full DevOps and `software-development` harvests and a 619-skill animation/video
+harvest. See [Run status](#run-status).
 
 ## Why this exists
 
@@ -33,6 +40,20 @@ python tools/skillget.py crawl --quiet
 
 # 3. Build the discovery index
 python tools/index.py
+```
+
+A targeted search instead of a whole category (each query gets its own catalog file):
+
+```powershell
+python tools/skillget.py catalog --category media --q "blender animation"
+python tools/skillget.py crawl   --category media --q "blender animation"
+```
+
+A search URL pasted from the site works as-is; the `category` and `q` parameters are
+both read from it:
+
+```powershell
+python tools/skillget.py crawl --category "https://www.typingmind.com/skills?category=media&q=capcut"
 ```
 
 If an agent session is live while you crawl, use the staging workflow below instead;
@@ -108,12 +129,84 @@ root, so they do not become skills themselves.
 To make a subset auto-invokable again, remove the `opencode/autoinvoke` line from
 those skills' frontmatter. Keep the subset small (tens, not thousands).
 
+## Search harvests (`--q`)
+
+`--q` runs the site's own search endpoint instead of paging a whole category. Results
+are cached per query in `data/catalog-<category>-<slugified-query>.json`, so a search
+never clobbers the category catalog (`data/catalog.json`) and re-running the same
+query is free. `crawl` reuses the cached search, then fetches details and installs
+exactly like a category crawl — same manifest, same dedupe, same `ok`-state skipping.
+
+```powershell
+python tools/skillget.py catalog --category media --q "motion graphics"   # count the hits
+python tools/skillget.py crawl   --category media --q "motion graphics"   # install them
+python tools/skillget.py crawl   --category media --q "ffmpeg" --workers 8
+```
+
+Search hits overlap across queries (a Blender skill also matches "animation"), so
+crawling many queries in sequence is safe: the manifest keys on slug and already-`ok`
+entries are skipped. That is how the animation/video set below was built — 23 queries,
+**619 unique skills, 0 failures**:
+
+| query | installed | query | installed |
+| --- | ---: | --- | ---: |
+| `ffmpeg` | 154 | `storyboard` | 62 |
+| `animation` | 152 | `motion graphics` | 49 |
+| `video generation` | 73 | `youtube shorts` | 32 |
+| `video editing` | 29 | `davinci resolve` | 22 |
+| `vfx` | 20 | `blender` | 17 |
+| `image to video` | 11 | `capcut` | 10 |
+| `kinetic typography` | 10 | `vertical video` | 10 |
+| `sound design` | 9 | `compositing` | 8 |
+| `3d animation` | 6 | `text to video` | 5 |
+| `character animation` | 4 | `lip sync` | 4 |
+| `blender render` | 2 | `2d animation` | 2 |
+| `stop motion` | 1 | | |
+
+Visible ones from that batch worth knowing about: `nocodehack-make-short` (9:16 short
+with bean characters in a painted Blender world), `varghq-blender-code-film` and
+`varghq-code-path-traced-film` (films written entirely in Python, the second writes its
+own path tracer), `el4cteo-blender-video-editing` / `-rendering` / `-lighting-lookdev`
+(Blender 5.3 specific), `mromidev-blender-film`, `mromidev-blender-forest`,
+`nicceasy-3d-product`, `angrypenguinpng-blender-claymation` (stop-motion claymation),
+`renezander030-capcut-edit` (reads/writes CapCut project files, not GUI clicking),
+`social-media-skills-capcut`, `mrpaidsocial-capcut-export`, `codepawl-edit-video`.
+
+### Reporting a search batch
+
+```powershell
+python tools/report_media.py      # per-query installed/missing/hit counts for data/catalog-media-*.json
+python tools/spotcheck_media.py   # prints each hit's folder, size, file count and description
+```
+
+`report_media.py` also registers the authoring skill (below) in the manifest, and
+verifies every installed folder really contains a `SKILL.md`.
+
+## Installing the authoring skill (`skill-creator`)
+
+`skillget` harvests third-party skills; the **authoring** skill — Anthropic's
+`skill-creator`, the one that drafts, tests and refines skills — is not in the
+TypingMind catalog, so it is fetched from its upstream repository instead:
+
+```powershell
+python tools/fetch_authoring_skill.py
+```
+
+It downloads all 18 files of
+[`anthropics/skills/skills/skill-creator`](https://github.com/anthropics/skills/tree/main/skills/skill-creator)
+(`SKILL.md`, `scripts/`, `agents/`, `references/`, `eval-viewer/`, LICENSE) into
+`~/.agents/skills/anthropic-skill-creator/` and writes a `.skillget.json` provenance
+record. The manifest slug is `anthropic-skill-creator`, so the skill loads by ID. The
+script is idempotent: re-running it refreshes the files in place.
+
 ## How it works
 
 1. **Catalog.** The TypingMind skills page is a Next.js app. Its page-data endpoint
    (`/_next/data/<buildId>/skills.json?category=devops&page=N&sort=stars`) returns 51
    skills per page as JSON. `skillget` walks every page and deduplicates by slug.
-   `sort=stars` is used because it is stable across page requests.
+   `sort=stars` is used because it is stable across page requests. The same endpoint
+   accepts `q=`; `tm_catalog.fetch_query()` pages that result set until `totalCount`
+   is reached, which is what `--q` uses.
 2. **Large categories (200-page cap).** The list endpoint clamps every ordering at
    page 200 (~10,200 rows), so a category bigger than that cannot be enumerated by
    paging alone (e.g. `software-development` reports 34,491). `skillget` detects this
@@ -145,6 +238,7 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 | Command | What it does |
 | --- | --- |
 | `python tools/skillget.py catalog` | Fetch and cache the category catalog. |
+| `python tools/skillget.py catalog --q "ffmpeg"` | Fetch and cache the hits for a site search. |
 | `python tools/skillget.py catalog --split-by author` | Force author partitioning (required past the 200-page cap). |
 | `python tools/skillget.py crawl` | Install every catalog skill not already `ok`. |
 | `python tools/skillget.py crawl --limit 50` | Install the next 50 only. |
@@ -153,6 +247,7 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 | `python tools/skillget.py crawl --fast` | Skip the raw `SKILL.md` request; use `bodyMarkdown`. |
 | `python tools/skillget.py crawl --no-resources` | Install only `SKILL.md`. |
 | `python tools/skillget.py crawl --dry-run` | Show the first 25 planned installs. |
+| `python tools/skillget.py crawl --q "blender"` | Install the hits for a site search. |
 | `python tools/skillget.py status` | Catalog size, manifest counts, folder count, last errors. |
 | `python tools/skillget.py verify` | Check every `ok` entry still has a non-empty `SKILL.md`. |
 | `python tools/skillget.py verify --fix` | Mark broken entries as `error` so `crawl` retries them. |
@@ -163,8 +258,12 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 | `python tools/index.py` | Write `skills-index.md` / `skills-index.json` for discovery. |
 | `python tools/audit.py --require-quiet` | Validate folders, `SKILL.md`, YAML, and the quiet flag. |
 | `python tools/report.py` | Coverage, licenses, resource-failure summary. |
+| `python tools/report.py --category media` | Same report scoped to one category. |
+| `python tools/fetch_authoring_skill.py` | Install Anthropic's `skill-creator` from its own repo. |
+| `python tools/report_media.py` | Per-query install/missing/hit counts for `data/catalog-media-*.json`; registers the authoring skill. |
+| `python tools/spotcheck_media.py` | Print folder, size, file count and description for each media-search hit. |
 
-Useful flags: `--category`, `--sort`, `--dest`, `--manifest`, `--workers`,
+Useful flags: `--category`, `--q`, `--sort`, `--dest`, `--manifest`, `--workers`,
 `--resource-workers`, `--refresh-catalog`, `--max-pages`, `--build`, `--force`,
 `--cache-details`, `--split-by`.
 
@@ -203,6 +302,9 @@ skillget/
     reconcile.py        # repair interrupted crawls, rebuild manifest from disk
     audit.py            # catalog/manifest/frontmatter audit
     report.py           # coverage report
+    fetch_authoring_skill.py  # install Anthropic's skill-creator
+    report_media.py     # per-query search-harvest report + authoring registration
+    spotcheck_media.py  # print descriptions of every media-search hit
     stage_existing.py   # move an existing live install to staging
     inspect_page.py     # debug: dump listing page structure
     dump_detail.py      # debug: dump one detail payload
@@ -233,9 +335,20 @@ skillget/
 
 ## Run status
 
+- **Manifest: 45,775 entries, 45,774 `ok`, 1 broken.** The broken entry is
+  `yaklang-reverse-shell-techniques` (missing `SKILL.md`) from an earlier security
+  crawl; `verify --fix` marks it `error` so `crawl --retry-errors` can repair it.
+- Harvests behind that total: DevOps (9,271), `software-development` (34,491), the
+  619-skill animation/video search batch above, plus a security and a media/CapCut
+  search batch.
+- Authoring skill: `~/.agents/skills/anthropic-skill-creator` (18 files, 33 KB
+  `SKILL.md`), slug `anthropic-skill-creator`, present in the index.
+- Discovery index: `~/.agents/skills-index.md` (15.9 MB) and
+  `~/.agents/skills-index.json` (29.9 MB), 45,774 entries.
 - Catalog: **9,271 / 9,271** unique DevOps skills (182 pages, `sort=stars`).
 - Install manifest: see `python tools/skillget.py status`.
-- Every skill folder contains `SKILL.md`; resource failures are recorded per skill.
+- Every verified skill folder contains `SKILL.md`; resource failures are recorded per
+  skill.
 - **Single-crawler only.** `crawl` takes a lock. If a run is interrupted, run
   `python tools/reconcile.py` (recovers temp installs, rebuilds the manifest) before
   resuming.
@@ -250,6 +363,13 @@ snapshot. Keep it in the manifest; a later catalog refresh can retry it.
 
 **Resource failures** — usually a renamed file in the upstream repo. Re-run
 `crawl --retry-errors --only <slug>`. The `SKILL.md` is still installed.
+
+**A search returns 0 hits** — the site matches on its own search index, so wording
+matters: `--q "blender animation"` finds nothing while `--q blender` and `--q animation`
+both return rows. Prefer short, single-topic queries and run several.
+
+**A search crawled nothing new** — every hit is already `ok` in the manifest. That is
+correct behaviour; use `--force` only to re-download deliberately.
 
 **Long Windows paths** — enable long-path support or install under a shorter root.
 Failures are recorded rather than aborting the run.

@@ -46,14 +46,41 @@ def normalize_category(value: str) -> str:
     return (query.get("category") or [value])[0]
 
 
+def catalog_path(category: str, query: str) -> Path:
+    """Searches get their own catalog file so they never clobber a full category."""
+    if not query:
+        return CATALOG_PATH
+    tag = "".join(ch if ch.isalnum() else "-" for ch in query.lower()).strip("-")
+    return DATA / f"catalog-{category}-{tag or 'query'}.json"
+
+
 def load_catalog(args) -> dict:
-    if CATALOG_PATH.exists() and not args.refresh_catalog:
-        data = tm_catalog.load_json(CATALOG_PATH, {})
-        if data.get("category") == args.category and data.get("skills"):
+    query = getattr(args, "q", "") or ""
+    path = catalog_path(args.category, query)
+    if path.exists() and not args.refresh_catalog:
+        data = tm_catalog.load_json(path, {})
+        if (data.get("category") == args.category
+                and (data.get("q") or "") == query
+                and data.get("skills")):
             return data
-    log(f"Fetching catalog for category={args.category} sort={args.sort} ...")
+    label = f"category={args.category}" + (f" q={query!r}" if query else "")
+    log(f"Fetching catalog for {label} sort={args.sort} ...")
     build = tm_catalog.discover_build_id()
     log(f"buildId={build}")
+    if query:
+        skills, total = tm_catalog.fetch_query(args.category, query, sort=args.sort, build=build)
+        data = {
+            "category": args.category,
+            "q": query,
+            "sort": args.sort,
+            "build": build,
+            "total": total,
+            "fetched_at": installer.utcnow(),
+            "skills": [s.__dict__ for s in skills],
+        }
+        tm_catalog.save_json(path, data)
+        log(f"Catalog saved: {len(skills)} unique skills (site reports {total}) -> {path}")
+        return data
     cap = tm_catalog.PAGE_SIZE * 200
     use_author = args.split_by == "author"
     if args.split_by != "none" and not args.max_pages:
@@ -108,8 +135,8 @@ def load_catalog(args) -> dict:
         "fetched_at": installer.utcnow(),
         "skills": [s.__dict__ for s in skills],
     }
-    tm_catalog.save_json(CATALOG_PATH, data)
-    log(f"Catalog saved: {len(skills)} unique skills (site reports {total}) -> {CATALOG_PATH}")
+    tm_catalog.save_json(path, data)
+    log(f"Catalog saved: {len(skills)} unique skills (site reports {total}) -> {path}")
     return data
 
 
@@ -331,6 +358,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     def common(sp):
         sp.add_argument("--category", default="devops")
+        sp.add_argument("--q", "--query", default="",
+                        help="site search text; also read from a pasted ?q= URL")
         sp.add_argument("--sort", default="stars")
         sp.add_argument("--dest", default=str(DEFAULT_DEST))
         sp.add_argument("--refresh-catalog", action="store_true")
@@ -388,7 +417,10 @@ def main(argv=None) -> int:
         pass
     args = build_parser().parse_args(argv)
     if getattr(args, "category", None):
-        args.category = normalize_category(args.category)
+        pasted = args.category
+        args.category = normalize_category(pasted)
+        if not args.q and "://" in pasted:
+            args.q = (parse_qs(urlparse(pasted).query).get("q") or [""])[0]
     return args.func(args)
 
 

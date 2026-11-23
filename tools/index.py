@@ -19,6 +19,56 @@ import installer  # noqa: E402
 import tm_catalog  # noqa: E402
 
 
+def frontmatter(path: Path, max_lines: int = 600) -> dict[str, str]:
+    """Read simple top-level scalar keys from a SKILL.md YAML (or JSON) frontmatter block.
+
+    Reads line by line until the closing `---` so large frontmatter blocks (some skills
+    carry multi-kilobyte metadata) are parsed in full without reading the whole file.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            if fh.readline().lstrip("\ufeff").strip() != "---":
+                return {}
+            lines: list[str] = []
+            for _ in range(max_lines):
+                line = fh.readline()
+                if not line:
+                    break
+                if line.rstrip("\r\n").strip() == "---":
+                    break
+                lines.append(line)
+    except OSError:
+        return {}
+    block = "\n".join(lines).strip()
+    if block.startswith("{"):
+        try:
+            data, _ = json.JSONDecoder().raw_decode(block)
+        except ValueError:
+            data = {}
+        if isinstance(data, dict):
+            return {
+                str(k): " ".join(str(v).split())
+                for k, v in data.items()
+                if isinstance(v, (str, int, float))
+            }
+    out: dict[str, str] = {}
+    key = None
+    for line in block.splitlines():
+        if not line.strip():
+            continue
+        if line[:1].isspace() and key:
+            out[key] = f"{out[key]} {line.strip()}".strip()
+            continue
+        if ":" in line:
+            key, _, value = line.partition(":")
+            key = key.strip().strip('"').strip("'")
+            value = value.strip()
+            if value in {"|", "|-", "|+", ">", ">-", ">+"}:
+                value = ""
+            out[key] = value.strip('"').strip("'")
+    return out
+
+
 def one_line(value: object, limit: int = 220) -> str:
     text = " ".join(str(value or "").split())
     if len(text) > limit:
@@ -54,14 +104,15 @@ def main() -> int:
             continue
         seen.add(folder)
         cat = by_slug.get(slug, {})
+        fm = frontmatter(skill_file)
         rows.append(
             {
                 "id": folder,
                 "slug": slug,
-                "name": entry.get("name") or cat.get("name") or folder,
-                "description": cat.get("description") or "",
+                "name": entry.get("name") or cat.get("name") or fm.get("name") or folder,
+                "description": cat.get("description") or fm.get("description") or "",
                 "source": entry.get("source") or cat.get("sourceURL") or "",
-                "license": entry.get("license") or "",
+                "license": entry.get("license") or fm.get("license") or "",
                 "stars": cat.get("stars") or 0,
                 "categories": entry.get("categories") or cat.get("categories") or [],
             }

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.3.0 — 2026-11-23
+
+- **Search harvests.** `--q` / `--query` crawls only the hits for a site search instead
+  of a whole category, and accepts a pasted `?q=` URL (the query is read from the URL
+  alongside the category). Each query gets its own catalog file
+  (`data/catalog-<category>-<slugified-query>.json`) so searches never clobber
+  `data/catalog.json`; `tm_catalog.fetch_query()` pages the search endpoint to
+  `totalCount`.
+- **Authoring skill.** `tools/fetch_authoring_skill.py` installs Anthropic's
+  `skill-creator` (18 files: `SKILL.md`, `scripts/`, `agents/`, `references/`,
+  `eval-viewer/`) into `~/.agents/skills/anthropic-skill-creator` with a
+  `.skillget.json` record and the manifest slug `anthropic-skill-creator`.
+- **Search-batch tooling.** `tools/report_media.py` reports per-query
+  installed/missing/hit counts and verifies each folder's `SKILL.md`;
+  `tools/spotcheck_media.py` prints size, file count and description per hit.
+- **`index.py`** falls back to the `SKILL.md` frontmatter (including JSON-style blocks)
+  for `name`, `description` and `license` when the catalog lacks them, so hand-installed
+  skills — such as the authoring skill — are described instead of blank.
+- **`report.py --category`** scopes the coverage report to one category and resolves
+  the matching `catalog-<category>.json`.
+- Harvested 619 skills across 23 animation/video/Blender/CapCut queries with 0
+  failures, bringing the manifest to 45,775 entries (45,774 `ok`).
+
 ## 0.2.0 — 2026-11-22
 
 - Enumerate categories larger than the 200-page list cap by partitioning on the

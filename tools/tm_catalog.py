@@ -226,6 +226,37 @@ def fetch_catalog_by_author(
     return out, total
 
 
+def fetch_query(
+    category: str,
+    q: str,
+    *,
+    sort: str = "stars",
+    build: str | None = None,
+) -> tuple[list[CatalogSkill], int]:
+    """Fetch every hit for a site search (``/skills?category=..&q=..``)."""
+    build = build or discover_build_id()
+    rows: list[dict] = []
+    total = 0
+    page = 1
+    while True:
+        pp = fetch_page_props(category, page=page, sort=sort, build=build, q=q)
+        total = int(pp.get("totalCount") or 0)
+        items = list(pp.get("skills") or [])
+        rows.extend(items)
+        if not items or page * PAGE_SIZE >= total:
+            break
+        page += 1
+    seen: set[str] = set()
+    out: list[CatalogSkill] = []
+    for row in rows:
+        slug = row.get("slug")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        out.append(CatalogSkill.from_json(row))
+    return out, total
+
+
 def fetch_detail(slug: str, build: str) -> dict[str, Any]:
     url = f"{BASE}/_next/data/{build}/skills/{slug}.json"
     last_err = "unknown"
