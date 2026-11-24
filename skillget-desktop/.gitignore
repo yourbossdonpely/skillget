@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.state/
+*.log
+
+# Tauri build artifacts and staged sidecar (regenerate with `npm run app:sidecar`)
+src-tauri/target/
+src-tauri/gen/
+src-tauri/resources/

@@ -15,7 +15,20 @@ Two modes:
 - **Category harvest** — mirror an entire category (`--category`).
 - **Search harvest** — crawl only the hits for a query (`--q`, or a pasted search URL).
 
-> **Status:** the local library holds **45,775 manifest entries** (45,774 `ok`), including
+## Desktop app (Windows)
+
+[`skillget-desktop/`](skillget-desktop/) is a Tauri 2 app over the same engine: browse the
+16 categories, search the catalog, read a skill's `SKILL.md`, and install it into
+`~/.agents/skills` with quiet mode and the same never-overwrite rules.
+
+![skillget desktop](skillget-desktop/docs/screenshots/browse.png)
+
+Download the installer or portable zip from the
+[latest release](https://github.com/yourbossdonpely/skillget/releases/latest); build it
+with `cd skillget-desktop && npm install && npm run app:build`. See
+[`skillget-desktop/README.md`](skillget-desktop/README.md) for details.
+
+> **Status:** the local library holds **45,856 manifest entries, all `ok`**, including
 the full DevOps and `software-development` harvests and a 619-skill animation/video
 harvest. See [Run status](#run-status).
 
@@ -35,7 +48,8 @@ python -m pip install -r requirements.txt
 # 1. Build the catalog (182 pages, 9,271 unique skills)
 python tools/skillget.py catalog
 
-# 2. Install everything into ~/.agents/skills, hidden from the auto-injected list
+# 2. Install everything into ~/.agents/skills; --quiet marks these installs as
+#    non-autoinvoking (still loadable by ID) so they stay out of the injected list
 python tools/skillget.py crawl --quiet
 
 # 3. Build the discovery index
@@ -77,6 +91,7 @@ Check progress / verify:
 ```powershell
 python tools/skillget.py status
 python tools/skillget.py verify
+python tools/skillget.py verify --include-local   # also audit non-manifest (hub) skills
 python tools/report.py
 ```
 
@@ -101,8 +116,8 @@ python tools/merge.py --source $stage
 
 OpenCode (and similar harnesses) inject the name and description of every available
 skill into the system prompt. A 9,271-skill library would consume more context than
-most models have. skillget therefore supports a **quiet** install: each `SKILL.md`
-gets one extra frontmatter key,
+most models have. skillget therefore supports a **quiet** install: each `SKILL.md` it
+installs with `crawl --quiet` gets one extra frontmatter key,
 
 ```yaml
 metadata:
@@ -112,6 +127,13 @@ metadata:
 The skill stays installed and can still be loaded by ID with the `skill` tool; it is
 simply omitted from the auto-injected list. The edit is line-based and preserves the
 rest of the original YAML.
+
+The flag is a property of skillget's own quiet installs, not of the skill root. Skills
+installed by other tooling under the same root (the hub/bundled skills) are configured
+by that tooling and may carry their own `autoinvoke` settings; skillget folders from an
+older, non-quiet crawl keep their original frontmatter, and so do skill files whose
+frontmatter the quiet pass could not edit. `tools/quiet.py --root <dir>` adds the flag
+to whichever of those folders you point it at.
 
 ```powershell
 # after the crawl, before or after merging:
@@ -126,8 +148,17 @@ python tools/index.py --dest "$env:USERPROFILE\.agents\skills"
 `~/.agents/skills-index.json` (full metadata). Both live outside the scanned skill
 root, so they do not become skills themselves.
 
+The index covers everything loadable under the skill root, not just what `skillget`
+installed. After the manifest pass it walks the root for `SKILL.md` files that the
+manifest does not record — hub/bundled skills, hand-placed folders, and skills nested
+in category directories — and adds a row for each, using the folder's path relative to
+the root as its ID (so a nested skill is `apple/apple-notes`, not `apple-notes`). Each
+JSON record carries an `origin` field: `skillget` for manifest-owned installs, `local`
+for the rest. Hidden directories and `node_modules` are skipped; skills without YAML
+frontmatter get their name and description from the first heading and prose line.
+
 To make a subset auto-invokable again, remove the `opencode/autoinvoke` line from
-those skills' frontmatter. Keep the subset small (tens, not thousands).
+those quiet installs' frontmatter. Keep the subset small (tens, not thousands).
 
 ## Search harvests (`--q`)
 
@@ -252,10 +283,10 @@ uses the same JSON the site renders, plus the public GitHub raw files.
 | `python tools/skillget.py verify` | Check every `ok` entry still has a non-empty `SKILL.md`. |
 | `python tools/skillget.py verify --fix` | Mark broken entries as `error` so `crawl` retries them. |
 | `python tools/skillget.py list --status error` | List manifest rows. |
-| `python tools/quiet.py --root <dir>` | Add `metadata.opencode/autoinvoke: false` to installed skills. |
+| `python tools/quiet.py --root <dir>` | Add `metadata.opencode/autoinvoke: false` to the skillget folders under `<dir>` (other managers' skills keep their own settings). |
 | `python tools/merge.py` | Merge staged skills into `~/.agents/skills`. |
 | `python tools/reconcile.py` | Repair an interrupted crawl: recover orphaned temp installs and rebuild the manifest from disk. |
-| `python tools/index.py` | Write `skills-index.md` / `skills-index.json` for discovery. |
+| `python tools/index.py` | Write `skills-index.md` / `skills-index.json` for discovery, covering manifest and hub-managed skills. |
 | `python tools/audit.py --require-quiet` | Validate folders, `SKILL.md`, YAML, and the quiet flag. |
 | `python tools/report.py` | Coverage, licenses, resource-failure summary. |
 | `python tools/report.py --category media` | Same report scoped to one category. |
@@ -296,7 +327,7 @@ skillget/
     tm_catalog.py       # catalog + detail API client
     github_fetch.py     # raw GitHub downloads
     installer.py        # atomic install, frontmatter, manifest
-    quiet.py            # add metadata.opencode/autoinvoke: false
+    quiet.py            # add metadata.opencode/autoinvoke: false (quiet installs)
     merge.py            # staging -> live merge
     index.py            # skills-index.md / skills-index.json
     reconcile.py        # repair interrupted crawls, rebuild manifest from disk
@@ -335,16 +366,22 @@ skillget/
 
 ## Run status
 
-- **Manifest: 45,775 entries, 45,774 `ok`, 1 broken.** The broken entry is
-  `yaklang-reverse-shell-techniques` (missing `SKILL.md`) from an earlier security
-  crawl; `verify --fix` marks it `error` so `crawl --retry-errors` can repair it.
+- **Manifest: 45,856 entries, all `ok`, 0 broken.** That is the skillget-owned part of
+  the root; the quiet/`autoinvoke` flag described above covers quiet-mode skillget
+  installs only, not the 180 skills installed by other tooling. `verify` reports
+  `verified ok: 45856` / `bad: 0`. The one break found earlier
+  (`snailsploit-offensive-sqli`, missing `SKILL.md`) was restored from its GitHub
+  source, and a follow-up audit found the recorded folder, the folder on disk and
+  each `.skillget.json` in agreement for every entry.
 - Harvests behind that total: DevOps (9,271), `software-development` (34,491), the
   619-skill animation/video search batch above, plus a security and a media/CapCut
   search batch.
 - Authoring skill: `~/.agents/skills/anthropic-skill-creator` (18 files, 33 KB
   `SKILL.md`), slug `anthropic-skill-creator`, present in the index.
-- Discovery index: `~/.agents/skills-index.md` (15.9 MB) and
-  `~/.agents/skills-index.json` (29.9 MB), 45,774 entries.
+- Discovery index: `~/.agents/skills-index.md` (16.5 MB) and
+  `~/.agents/skills-index.json` (32.1 MB), **46,036 entries** — 45,856 `origin:
+  skillget` plus 180 `origin: local` skills managed by other tooling under the same
+  root (122 top-level, 58 inside category folders).
 - Catalog: **9,271 / 9,271** unique DevOps skills (182 pages, `sort=stars`).
 - Install manifest: see `python tools/skillget.py status`.
 - Every verified skill folder contains `SKILL.md`; resource failures are recorded per

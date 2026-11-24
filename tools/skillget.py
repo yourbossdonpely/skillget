@@ -314,6 +314,74 @@ def cmd_status(args) -> int:
     return 0
 
 
+def _usable_skill_md(path: Path) -> str:
+    """Return why a SKILL.md is unusable, or "" when it is fine (read-only)."""
+    try:
+        if path.stat().st_size == 0:
+            return "empty SKILL.md"
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as e:
+        return f"unreadable SKILL.md ({e.__class__.__name__})"
+    if not text.strip():
+        return "whitespace-only SKILL.md"
+    body = text
+    if text.lstrip("\ufeff").lstrip().startswith("---"):
+        parts = text.split("---")
+        body = "---".join(parts[2:]) if len(parts) > 2 else ""
+    if not body.strip():
+        return "SKILL.md has frontmatter but no body"
+    return ""
+
+
+def local_skills(dest: Path, manifest: installer.Manifest) -> tuple[list, list]:
+    """Audit skill folders the skillget manifest does not own (read-only).
+
+    Covers hub/bundled and hand-placed skills, flat or nested in category
+    directories. Never writes the manifest, provenance or skill files.
+    """
+    owned = {e.get("folder") for e in manifest.data["skills"].values() if e.get("folder")}
+    ok = 0
+    bad = []
+
+    def children(folder: Path) -> list[Path]:
+        return sorted(c for c in folder.iterdir()
+                      if c.is_dir() and not c.name.startswith(".") and c.name != "node_modules")
+
+    def check(folder: Path) -> None:
+        """A folder is a skill candidate if it sits at the top level or inside a
+        category folder; resource subfolders of a skill are never candidates."""
+        nonlocal ok
+        rel = folder.relative_to(dest).as_posix()
+        is_owned = rel in owned or (folder / ".skillget.json").exists()
+        md = folder / "SKILL.md"
+        has_md = md.is_file()
+        if has_md and not is_owned:
+            why = _usable_skill_md(md)
+            if why:
+                bad.append((rel, why))
+            else:
+                ok += 1
+        kids = children(folder)
+        nested = [c for c in kids if (c / "SKILL.md").is_file()]
+        if has_md:
+            # usually a skill and its resources; a few carry skills of their
+            # own too (e.g. "research"), so follow those but skip resources
+            for child in nested:
+                check(child)
+            return
+        if nested:
+            # a category folder: every child is a skill candidate
+            for child in kids:
+                check(child)
+            return
+        if not is_owned:
+            bad.append((rel, "missing SKILL.md"))
+
+    for folder in children(dest):
+        check(folder)
+    return ok, bad
+
+
 def cmd_verify(args) -> int:
     manifest = installer.Manifest(Path(args.manifest))
     dest = Path(args.dest).expanduser().resolve()
@@ -336,6 +404,13 @@ def cmd_verify(args) -> int:
     print(f"bad: {len(bad)}")
     for slug, why in bad[:20]:
         print(f"  {slug}: {why}")
+    if getattr(args, "include_local", False):
+        local_ok, local_bad = local_skills(dest, manifest)
+        print(f"local (manifest-external) ok: {local_ok}")
+        print(f"local bad: {len(local_bad)}")
+        for folder, why in local_bad[:20]:
+            print(f"  {folder}: {why}")
+        bad = bad + local_bad
     return 1 if bad else 0
 
 
@@ -400,6 +475,8 @@ def build_parser() -> argparse.ArgumentParser:
     c.add_argument("--dest", default=str(DEFAULT_DEST))
     c.add_argument("--manifest", default=str(MANIFEST_PATH))
     c.add_argument("--fix", action="store_true")
+    c.add_argument("--include-local", action="store_true",
+                   help="also audit skill folders the manifest does not own (read-only)")
     c.set_defaults(func=cmd_verify)
 
     c = sub.add_parser("list", help="list manifest entries")

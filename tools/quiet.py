@@ -22,11 +22,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+try:  # optional: only the --repair verification needs it
+    import yaml
+except Exception:  # pragma: no cover - PyYAML is in requirements.txt
+    yaml = None
+
 FLAG = "opencode/autoinvoke"
 DEFAULT_ROOT = Path.home() / "AppData" / "Local" / "Temp" / "opencode" / "skillget-staging"
 FLAG_RE = re.compile(r"^\s*[\"']?" + re.escape(FLAG) + r"[\"']?\s*:\s*(.*)$")
 META_RE = re.compile(r"^[\"']?metadata[\"']?\s*:\s*(.*)$")
 DISABLE_RE = re.compile(r"^\s*[\"']?disable-model-invocation[\"']?\s*:\s*(.*)$")
+# The flag wherever it sits, including inside an inline `metadata: { ... }` map.
+FLAG_ANY_RE = re.compile(
+    r"opencode/autoinvoke\s*:\s*[\"']?(true|false|yes|no|on|off|1|0)", re.I
+)
 
 
 def split_frontmatter(text: str) -> tuple[list[str], str, str] | None:
@@ -52,10 +61,68 @@ def already_quiet(fm: list[str]) -> bool:
         m = DISABLE_RE.match(line)
         if m and truthy(m.group(1)):
             return True
-        m = FLAG_RE.match(line)
+        m = FLAG_ANY_RE.search(line)
         if m and not truthy(m.group(1)):
             return True
     return False
+
+
+def dedupe_flags(fm: list[str]) -> tuple[list[str], int]:
+    """Collapse repeated `opencode/autoinvoke: false` keys to one. Returns (lines, removed)."""
+    out: list[str] = []
+    seen = False
+    removed = 0
+    for line in fm:
+        hits = list(FLAG_ANY_RE.finditer(line))
+        if not hits:
+            out.append(line)
+            continue
+        if seen:
+            stripped = FLAG_ANY_RE.sub("", line).strip().lstrip(",").strip()
+            if stripped in {"", ","}:
+                removed += 1
+                continue
+        # Drop every occurrence after the first (with its separating comma).
+        for match in reversed(hits[1:]):
+            end = match.end()
+            if line[end:end + 1] == ",":
+                end += 1
+            line = line[: match.start()] + line[end:]
+            removed += 1
+        line = re.sub(r",\s*,", ",", line).rstrip()
+        if false_in(line):
+            seen = True
+        out.append(line)
+    return out, removed
+
+
+def false_in(line: str) -> bool:
+    match = FLAG_ANY_RE.search(line)
+    return bool(match) and not truthy(match.group(1))
+
+
+def block_child_indent(fm: list[str], idx: int) -> str:
+    """Indentation for a new child of the block at `idx`, matching its existing children."""
+    parent = len(fm[idx]) - len(fm[idx].lstrip())
+    for line in fm[idx + 1:]:
+        if not line.strip():
+            continue
+        indent = len(line) - len(line.lstrip())
+        return " " * (indent if indent > parent else parent + 2)
+    return " " * (parent + 2)
+
+
+def mark_flow(fm: list[str], child: int) -> tuple[list[str], str]:
+    """Add the flag inside a flow mapping that opens on line `child`."""
+    line = fm[child]
+    stripped = line.lstrip()
+    body = stripped[1:].lstrip()  # text after the opening brace
+    lead = line[: len(line) - len(stripped)]
+    if body == "}":
+        fm[child] = f"{lead}{{{FLAG}: false}}"
+    else:
+        fm[child] = f"{lead}{{{FLAG}: false, {body}"
+    return fm, "added"
 
 
 def mark(fm: list[str]) -> tuple[list[str], str]:
@@ -67,17 +134,34 @@ def mark(fm: list[str]) -> tuple[list[str], str]:
         m = FLAG_RE.match(line)
         if m:
             indent = line[: len(line) - len(line.lstrip())]
-            fm[idx] = f"{indent}{FLAG}: false"
+            key = line.split(":", 1)[0].strip()  # keep JSON-style quotes if present
+            trailing = "," if line.rstrip().endswith(",") else ""
+            new = f"{indent}{key}: false{trailing}"
+            if new == line:
+                return fm, "already"
+            fm[idx] = new
             return fm, "updated"
 
     for idx, line in enumerate(fm):
         m = META_RE.match(line)
         if not m:
             continue
+        if FLAG_ANY_RE.search(line):
+            # Inline map that already names the flag: flip it instead of adding a key.
+            new = FLAG_ANY_RE.sub(f"{FLAG}: false", line, count=1)
+            if new == line:
+                return fm, "already"
+            fm[idx] = new
+            return fm, "updated"
         value = m.group(1).strip()
         if value in {"", "null", "~"}:
+            child = next((k for k in range(idx + 1, len(fm)) if fm[k].strip()), None)
+            if child is not None and fm[child].lstrip().startswith("{"):
+                # `metadata:` followed by a flow mapping on later lines: a block key
+                # cannot precede it, so the flag has to go inside the braces.
+                return mark_flow(fm, child)
             fm[idx] = "metadata:"
-            fm.insert(idx + 1, f"  {FLAG}: false")
+            fm.insert(idx + 1, f"{block_child_indent(fm, idx)}{FLAG}: false")
             return fm, "added"
         if value.startswith("{") and value.endswith("}"):
             inner = value[1:-1].strip()
@@ -85,6 +169,13 @@ def mark(fm: list[str]) -> tuple[list[str], str]:
                 fm[idx] = f"metadata: {{ {FLAG}: false, {inner} }}"
             else:
                 fm[idx] = f"metadata: {{ {FLAG}: false }}"
+            return fm, "added"
+        if value.startswith("{"):
+            # Flow mapping opened on the `metadata:` line and continued below.
+            line = fm[idx]
+            brace = line.index("{")
+            rest = line[brace + 1:].strip()
+            fm[idx] = f"{line[:brace + 1]} {FLAG}: false," + (f" {rest}" if rest else "")
             return fm, "added"
         # Unusual metadata value (list, scalar). Fall back to a second key, which
         # YAML would reject as a duplicate, so leave it alone and report.
@@ -115,6 +206,17 @@ def ensure_quiet(text: str, name: str = "skill", description: str = "") -> tuple
     return nl.join(["---", *new_fm, "---"]) + nl + body, status
 
 
+def write_skill(path: Path, text: str) -> None:
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".skillget-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def process(path: Path) -> str:
     try:
         text = path.read_text(encoding="utf-8")
@@ -128,22 +230,108 @@ def process(path: Path) -> str:
     new_text, status = ensure_quiet(text, meta.get("name") or path.parent.name)
     if status in {"already", "unparsed"}:
         return status
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".skillget-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="") as fh:
-            fh.write(new_text)
-        os.replace(tmp, path)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+    parsed = split_frontmatter(new_text)
+    if yaml is not None and parsed and not yaml_ok(parsed[0]):
+        # Never write frontmatter we cannot parse; report it instead.
+        return "unverified"
+    write_skill(path, new_text)
     meta["quiet"] = True
     meta_path.write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     return status
 
 
+def yaml_ok(fm: list[str]) -> bool:
+    if yaml is None:
+        return False
+    try:
+        data = yaml.safe_load("\n".join(fm))
+    except Exception:
+        return False
+    return isinstance(data, dict)
+
+
+def repair_json_frontmatter(path: Path, fm: list[str], body: str, nl: str, dry_run: bool) -> str:
+    """Deal with a JSON frontmatter object that a YAML `metadata:` tail was appended to."""
+    tail = list(fm)
+    while tail and not tail[-1].strip():
+        tail.pop()
+    if len(tail) < 2 or not META_RE.match(tail[-2]) or not FLAG_RE.match(tail[-1]):
+        return "unrepairable"
+    new_fm = tail[:-2]
+    for idx, line in enumerate(new_fm):
+        if re.match(r'^\s*"metadata"\s*:\s*\{', line):
+            indent = line[: len(line) - len(line.lstrip())] + "  "
+            new_fm.insert(idx + 1, f'{indent}"opencode/autoinvoke": false,')
+            break
+    else:
+        return "unrepairable"
+    try:
+        data = json.loads(nl.join(new_fm))
+    except ValueError:
+        return "unrepairable"
+    if not isinstance(data, dict) or not isinstance(data.get("metadata"), dict):
+        return "unrepairable"
+    if data["metadata"].get("opencode/autoinvoke") is not False:
+        return "unrepairable"
+    if not dry_run:
+        write_skill(path, nl.join(["---", *new_fm, "---"]) + nl + body)
+    return "would-repair" if dry_run else "repaired"
+
+
+def repair(path: Path, dry_run: bool = False) -> str:
+    """Undo a flag line that mis-indented frontmatter into invalid YAML.
+
+    Drops the flag inserted right after `metadata:`, re-adds it with that block's own
+    child indentation (or inside a flow mapping), and writes only when the result
+    parses as a mapping. Files that were already invalid are reported, not rewritten.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    parsed = split_frontmatter(text)
+    if parsed is None:
+        return "no-frontmatter"
+    if yaml is None:
+        return "no-yaml-validator"
+    fm, body, nl = parsed
+    new_fm, removed = dedupe_flags(fm)
+    if removed:
+        if not yaml_ok(new_fm):
+            return "unrepairable"
+        if not dry_run:
+            write_skill(path, nl.join(["---", *new_fm, "---"]) + nl + body)
+        return "would-dedupe" if dry_run else "deduped"
+    if yaml_ok(fm):
+        return "ok"
+    if fm and fm[0].lstrip().startswith("{"):
+        return repair_json_frontmatter(path, fm, body, nl, dry_run)
+    for idx, line in enumerate(fm):
+        meta = META_RE.match(line)
+        if not meta or meta.group(1).strip():
+            continue
+        child = next((k for k in range(idx + 1, len(fm)) if fm[k].strip()), None)
+        if child is None or not FLAG_RE.match(fm[child]):
+            continue
+        original = list(fm)
+        del fm[child]
+        new_fm, status = mark(fm)
+        if status in {"already", "unparsed"} or not yaml_ok(new_fm):
+            fm[:] = original
+            return "unrepairable"
+        if not dry_run:
+            write_skill(path, nl.join(["---", *new_fm, "---"]) + nl + body)
+        return "would-repair" if dry_run else "repaired"
+    return "unrepairable"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Add metadata.opencode/autoinvoke: false to installed skills")
     ap.add_argument("--root", default=str(DEFAULT_ROOT))
+    ap.add_argument("--manifest", default=None,
+                    help="only touch folders recorded as ok in this manifest (leaves other managers' skills alone)")
+    ap.add_argument("--repair", action="store_true",
+                    help="fix frontmatter broken by a mis-indented flag; only writes when it parses")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
@@ -155,7 +343,23 @@ def main() -> int:
 
     counts: dict[str, int] = {}
     examples: dict[str, list[str]] = {}
-    folders = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
+    if args.manifest:
+        try:
+            data = json.loads(Path(args.manifest).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"could not read manifest {args.manifest}: {exc}", file=sys.stderr)
+            return 2
+        entries = data.get("skills", {}) if isinstance(data, dict) else {}
+        wanted = {
+            str(entry.get("folder"))
+            for entry in entries.values()
+            if isinstance(entry, dict) and entry.get("status") == "ok" and entry.get("folder")
+        }
+        folders = [root / name for name in sorted(wanted) if (root / name).is_dir()]
+        counts["folder-missing"] = len(wanted) - len(folders)
+        print(f"manifest: {args.manifest} ({len(wanted):,} ok folders)")
+    else:
+        folders = sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("."))
     for i, folder in enumerate(folders):
         if args.limit is not None and i >= args.limit:
             break
@@ -163,7 +367,9 @@ def main() -> int:
         if not skill.is_file():
             counts["missing-skill-md"] = counts.get("missing-skill-md", 0) + 1
             continue
-        if args.dry_run:
+        if args.repair:
+            status = repair(skill, args.dry_run)
+        elif args.dry_run:
             text = skill.read_text(encoding="utf-8", errors="replace")
             _, status = ensure_quiet(text, folder.name)
         else:
@@ -176,8 +382,9 @@ def main() -> int:
     print(f"root: {root}")
     print(f"folders: {len(folders)}")
     for status in sorted(counts):
-        print(f"  {status}: {counts[status]}  e.g. {', '.join(examples[status])}")
-    return 1 if counts.get("unparsed") or counts.get("no-frontmatter") else 0
+        print(f"  {status}: {counts[status]}  e.g. {', '.join(examples.get(status, []))}")
+    failing = ("unparsed", "no-frontmatter", "unrepairable", "no-yaml-validator")
+    return 1 if any(counts.get(key) for key in failing) else 0
 
 
 if __name__ == "__main__":
