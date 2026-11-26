@@ -1,4 +1,4 @@
-# skillget
+# skillget by Don PELY
 
 Harvest open-source AI agent skills from the
 [TypingMind Skills directory](https://www.typingmind.com/skills) and install them as
